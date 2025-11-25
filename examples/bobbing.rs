@@ -29,7 +29,7 @@ impl GameState {
         gs.boxes.push(Vec2::new(0.0, 100.0));
     }
 
-    pub fn update(mut gs: ResMut<Self>, mut d: ResMut<DrawNext>, time: Res<Time>) {
+    pub fn update(gs: ResMut<Self>, mut d: ResMut<DrawNext>, time: Res<Time>) {
         for b in gs.boxes.iter() {
             d.draw_keyed(
                 Transform::from_translation(Vec3::new(
@@ -38,10 +38,7 @@ impl GameState {
                     0.0,
                 ))
                 .with_scale(Vec3::splat(32.0)),
-                Drawable::Primitive(Primitive {
-                    color: css::RED.into(),
-                    shape: PrimitiveShape::Rect,
-                }),
+                Drawable::from(Primitive::rect(css::RED.into())),
                 b.as_ivec2(),
             );
         }
