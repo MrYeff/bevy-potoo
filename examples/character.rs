@@ -1,4 +1,4 @@
-use bevy::{color::palettes::css, prelude::*};
+use bevy::{asset, color::palettes::css, prelude::*};
 use bevy_potoo::prelude::*;
 
 fn main() {
@@ -32,6 +32,7 @@ impl GameState {
         mut d: ResMut<DrawNext>,
         time: Res<Time>,
         input: Res<ButtonInput<KeyCode>>,
+        assets: Res<AssetServer>,
     ) {
         if input.pressed(KeyCode::KeyA) {
             gs.player_pos.x -= 300.0 * time.delta_secs();
@@ -48,8 +49,14 @@ impl GameState {
 
         d.draw(
             Transform::from_translation(Vec3::new(gs.player_pos.x, gs.player_pos.y, 0.0))
-                .with_scale(Vec3::splat(64.0)),
-            Drawable::from(Primitive::circle(css::BLUE.into())),
+                .with_scale(Vec3::splat(1.0)),
+            Drawable::from(assets.load("character.png")),
+        );
+
+        d.draw(
+            Transform::from_translation(Vec3::new(gs.player_pos.x + 100.0, gs.player_pos.y, 0.0))
+                .with_scale(Vec3::splat(1.0)),
+            Drawable::from(assets.load("character.png")),
         );
     }
 }

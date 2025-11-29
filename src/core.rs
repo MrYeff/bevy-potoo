@@ -34,7 +34,7 @@ impl DrawNext {
         drawable: impl Into<Drawable>,
         key: impl Hash,
     ) {
-        let callsite = get_callsite();
+        let callsite = (Location::caller() as *const Location) as u64;
         let key = hash_ident(&key);
         match drawable.into() {
             Drawable::Image(img) => {
@@ -50,13 +50,18 @@ impl DrawNext {
 
     #[track_caller]
     pub fn draw(&mut self, iso: impl Into<Transform>, drawable: impl Into<Drawable>) {
-        self.draw_keyed(iso, drawable, ());
+        let callsite = (Location::caller() as *const Location) as u64;
+        match drawable.into() {
+            Drawable::Image(img) => {
+                self.img_requests
+                    .insert(ImmidiateId(callsite, 0), (iso.into(), img));
+            }
+            Drawable::Primitive(prim) => {
+                self.prim_requests
+                    .insert(ImmidiateId(callsite, 0), (iso.into(), prim));
+            }
+        };
     }
-}
-
-fn get_callsite() -> CallsiteId {
-    let loc: &'static Location = Location::caller();
-    (loc as *const Location) as u64
 }
 
 fn hash_ident<T: Hash>(ident: &T) -> u64 {

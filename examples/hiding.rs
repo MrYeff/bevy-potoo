@@ -7,6 +7,7 @@ fn main() {
     app.add_plugins(PotooPlugin);
 
     app.init_resource::<GameState>();
+    app.add_systems(Startup, setup);
     app.add_systems(Update, GameState::update);
 
     app.run();
