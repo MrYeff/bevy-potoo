@@ -1,189 +1,154 @@
-use crate::prelude::*;
+use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
-use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
-use std::fmt::Debug;
-use std::hash::{Hash, Hasher};
-use std::panic::Location;
-
-type CallsiteId = u64;
+use std::{
+    fmt::Debug,
+    hash::{Hash, Hasher},
+    panic::Location,
+};
 
 #[derive(Component, Hash, Eq, PartialEq, Debug)]
-pub struct ImmidiateId(CallsiteId, u64);
+enum ImmidiateId {
+    Single { callsite: u64 },
+    Keyed { callsite: u64, ident: u64 },
+    GlobalKeyed(Box<str>),
+}
 
 #[derive(Resource, Default)]
-pub struct DrawNext {
-    img_requests: HashMap<ImmidiateId, (Transform, Handle<Image>)>,
-    prim_requests: HashMap<ImmidiateId, (Transform, Primitive)>,
-}
+pub struct FlurpStorage(
+    HashMap<ImmidiateId, Box<dyn FnOnce(&mut EntityCommands) + 'static + Send + Sync>>,
+);
 
-impl Debug for DrawNext {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DrawNext")
-            .field("img_requests:", &self.img_requests.len())
-            .field("prim_requests", &self.prim_requests.len())
-            .finish()
-    }
-}
-
-impl DrawNext {
+impl FlurpStorage {
     #[track_caller]
-    pub fn draw_keyed(
+    pub fn flurp(&mut self, f: impl FnOnce(&mut EntityCommands) + 'static + Send + Sync) {
+        let loc: &'static Location = Location::caller();
+        let callsite = (loc as *const Location) as u64;
+
+        assert!(
+            self.0
+                .insert(ImmidiateId::Single { callsite }, Box::new(f))
+                .is_none(),
+        );
+    }
+
+    #[track_caller]
+    pub fn flurp_keyed<K: IntoIdent + Debug>(
         &mut self,
-        iso: impl Into<Transform>,
-        drawable: impl Into<Drawable>,
-        key: impl Hash,
+        key: K,
+        f: impl FnOnce(&mut EntityCommands) + 'static + Send + Sync,
     ) {
-        let callsite = (Location::caller() as *const Location) as u64;
-        let key = hash_ident(&key);
-        match drawable.into() {
-            Drawable::Image(img) => {
-                self.img_requests
-                    .insert(ImmidiateId(callsite, key), (iso.into(), img));
-            }
-            Drawable::Primitive(prim) => {
-                self.prim_requests
-                    .insert(ImmidiateId(callsite, key), (iso.into(), prim));
-            }
-        };
+        let loc: &'static Location = Location::caller();
+        let callsite = (loc as *const Location) as u64;
+        let ident = key.into_ident();
+
+        assert!(
+            self.0
+                .insert(ImmidiateId::Keyed { callsite, ident }, Box::new(f))
+                .is_none(),
+        );
     }
 
     #[track_caller]
-    pub fn draw(&mut self, iso: impl Into<Transform>, drawable: impl Into<Drawable>) {
-        let callsite = (Location::caller() as *const Location) as u64;
-        match drawable.into() {
-            Drawable::Image(img) => {
-                self.img_requests
-                    .insert(ImmidiateId(callsite, 0), (iso.into(), img));
-            }
-            Drawable::Primitive(prim) => {
-                self.prim_requests
-                    .insert(ImmidiateId(callsite, 0), (iso.into(), prim));
-            }
-        };
+    pub fn flurp_insert(&mut self, b: impl Bundle) {
+        let loc: &'static Location = Location::caller();
+        let callsite = (loc as *const Location) as u64;
+
+        assert!(
+            self.0
+                .insert(
+                    ImmidiateId::Single { callsite },
+                    Box::new(move |ec| {
+                        ec.insert(b);
+                    })
+                )
+                .is_none(),
+        );
     }
+
+    #[track_caller]
+    pub fn flurp_insert_keyed<K: IntoIdent + Debug>(&mut self, key: K, b: impl Bundle) {
+        let loc: &'static Location = Location::caller();
+        let callsite = (loc as *const Location) as u64;
+        let ident = key.into_ident();
+
+        assert!(
+            self.0
+                .insert(
+                    ImmidiateId::Keyed { callsite, ident },
+                    Box::new(move |ec| {
+                        ec.insert(b);
+                    })
+                )
+                .is_none(),
+        );
+    }
+
+    // pub fn flurp_this<'a>(
+    //     &mut self,
+    //     id: impl Into<Cow<'a, str>>,
+    //     f: impl Fn(&mut EntityCommands) + 'static + Send + Sync,
+    // ) {
+    //     let id = id.into();
+    //     self.0.insert(
+    //         ImmidiateId::GlobalKeyed(id.into_owned().into_boxed_str()),
+    //         Box::new(f),
+    //     );
+    // }
 }
 
-fn hash_ident<T: Hash>(ident: &T) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    ident.hash(&mut hasher);
-    hasher.finish() + 1
-}
+#[derive(Component)]
+#[component(storage = "SparseSet")]
+pub struct Active;
 
-pub(super) fn update_sprites(
-    mut draw_next: ResMut<DrawNext>,
-    mut entities: Query<(&ImmidiateId, &mut Transform, &mut Visibility, &mut Sprite)>,
-    mut commands: Commands,
-) {
-    for (id, mut tf, mut vis, mut sprite) in entities.iter_mut() {
-        if let Some((tf_new, img)) = draw_next.img_requests.remove(id) {
-            *tf = tf_new;
-            sprite.image = img;
-            *vis = Visibility::Visible;
-        } else {
-            *vis = Visibility::Hidden;
+impl FlurpStorage {
+    fn apply(
+        mut diffs: ResMut<Self>,
+        enabled: Query<(Entity, &ImmidiateId), With<Active>>,
+        disabled: Query<(Entity, &ImmidiateId), Without<Active>>,
+        mut commands: Commands,
+    ) {
+        for (e, id) in disabled {
+            if let Some(t) = diffs.0.remove(id) {
+                t(&mut commands.entity(e).insert(Active));
+            }
+        }
+
+        for (e, id) in enabled {
+            if let Some(t) = diffs.0.remove(id) {
+                t(&mut commands.entity(e));
+            } else {
+                commands.entity(e).remove::<Active>();
+            }
+        }
+
+        for (id, t) in diffs.0.drain() {
+            t(&mut commands.spawn((id, Active)));
         }
     }
+}
 
-    for (id, (tf_new, img)) in draw_next.img_requests.drain() {
-        commands.spawn((id, tf_new, Visibility::Visible, Sprite::from_image(img)));
+#[derive(SystemSet, Hash, PartialEq, Eq, Clone, Debug)]
+pub struct FlurpPlugin;
+
+impl Plugin for FlurpPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<FlurpStorage>();
+        app.add_systems(Update, (FlurpStorage::apply).in_set(FlurpPlugin));
     }
 }
 
-struct PrebuildMeshes {
-    circle_mesh: Handle<Mesh>,
-    rect_mesh: Handle<Mesh>,
+pub trait IntoIdent {
+    fn into_ident(self) -> u64;
 }
 
-#[derive(Resource)]
-pub(super) struct PrimMeshesMaterials {
-    color_materials: HashMap<ColorKey, Handle<ColorMaterial>>,
-    prebuilt_meshes: PrebuildMeshes,
-}
-
-pub(super) fn init_prim_meshes_materials(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
-    let circle_mesh = meshes.add(Circle::default());
-    let rect_mesh = meshes.add(Rectangle::default());
-
-    commands.insert_resource(PrimMeshesMaterials {
-        color_materials: HashMap::new(),
-        prebuilt_meshes: PrebuildMeshes {
-            circle_mesh,
-            rect_mesh,
-        },
-    });
-}
-
-pub(super) fn update_primitives(
-    mut draw_next: ResMut<DrawNext>,
-    mut entities: Query<(
-        &ImmidiateId,
-        &mut Transform,
-        &mut Visibility,
-        &mut Mesh2d,
-        &mut MeshMaterial2d<ColorMaterial>,
-    )>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-    mut prim_meshes_materials: ResMut<PrimMeshesMaterials>,
-    mut commands: Commands,
-) {
-    for (id, mut tf, mut vis, mut mesh2d, mut mat2d) in entities.iter_mut() {
-        if let Some((tf_new, prim)) = draw_next.prim_requests.remove(id) {
-            let mesh_handle = match prim.shape {
-                PrimitiveShape::Circle => prim_meshes_materials.prebuilt_meshes.circle_mesh.clone(),
-                PrimitiveShape::Rect => prim_meshes_materials.prebuilt_meshes.rect_mesh.clone(),
-            };
-
-            *tf = tf_new;
-            mesh2d.0 = mesh_handle;
-
-            let color_material = prim_meshes_materials
-                .color_materials
-                .entry(prim.color.into())
-                .or_insert_with(|| materials.add(ColorMaterial::from(prim.color)))
-                .clone();
-
-            mat2d.0 = color_material;
-
-            *vis = Visibility::Visible;
-        } else {
-            *vis = Visibility::Hidden;
-        }
-    }
-
-    for (id, (tf_new, prim)) in draw_next.prim_requests.drain() {
-        let mesh_handle = match prim.shape {
-            PrimitiveShape::Circle => prim_meshes_materials.prebuilt_meshes.circle_mesh.clone(),
-            PrimitiveShape::Rect => prim_meshes_materials.prebuilt_meshes.rect_mesh.clone(),
-        };
-
-        let color_material = prim_meshes_materials
-            .color_materials
-            .entry(prim.color.into())
-            .or_insert_with(|| materials.add(ColorMaterial::from(prim.color)))
-            .clone();
-
-        commands.spawn((
-            id,
-            tf_new,
-            Visibility::Visible,
-            Mesh2d(mesh_handle),
-            MeshMaterial2d(color_material),
-        ));
+impl IntoIdent for u64 {
+    fn into_ident(self) -> u64 {
+        self
     }
 }
 
-#[derive(Hash, Eq, PartialEq)]
-struct ColorKey([u8; 4]);
-
-impl From<Color> for ColorKey {
-    fn from(color: Color) -> Self {
-        let rgba = color.to_srgba();
-        ColorKey([
-            (rgba.red * 255.0) as u8,
-            (rgba.green * 255.0) as u8,
-            (rgba.blue * 255.0) as u8,
-            (rgba.alpha * 255.0) as u8,
-        ])
+impl IntoIdent for usize {
+    fn into_ident(self) -> u64 {
+        self as u64
     }
 }
