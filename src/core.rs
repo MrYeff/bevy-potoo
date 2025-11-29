@@ -1,154 +1,145 @@
-use bevy::platform::collections::HashMap;
+use crate::fun::EntityFn;
+use crate::ident::{Ident, Key, Loc};
+use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
-use std::{
-    fmt::Debug,
-    hash::{Hash, Hasher},
-    panic::Location,
-};
+use bevy::{ecs::system::SystemParam, platform::collections::HashMap};
+use std::fmt::Debug;
+use std::mem;
+use std::panic::Location;
 
-#[derive(Component, Hash, Eq, PartialEq, Debug)]
-enum ImmidiateId {
-    Single { callsite: u64 },
-    Keyed { callsite: u64, ident: u64 },
-    GlobalKeyed(Box<str>),
+enum Status {
+    Active,
+    Inactive,
 }
 
 #[derive(Resource, Default)]
-pub struct FlurpStorage(
-    HashMap<ImmidiateId, Box<dyn FnOnce(&mut EntityCommands) + 'static + Send + Sync>>,
-);
+struct GepData {
+    ident_to_entity: HashMap<Ident, Entity>,
 
-impl FlurpStorage {
-    #[track_caller]
-    pub fn flurp(&mut self, f: impl FnOnce(&mut EntityCommands) + 'static + Send + Sync) {
-        let loc: &'static Location = Location::caller();
-        let callsite = (loc as *const Location) as u64;
+    all_calls: HashSet<(Loc, Option<Key>)>,
+    all_calls_next: Vec<(Loc, Option<Key>)>,
 
-        assert!(
-            self.0
-                .insert(ImmidiateId::Single { callsite }, Box::new(f))
-                .is_none(),
-        );
-    }
+    prev_calls: HashSet<(Loc, Option<Key>)>,
+    prev_calls_next: Vec<(Loc, Option<Key>)>,
 
-    #[track_caller]
-    pub fn flurp_keyed<K: IntoIdent + Debug>(
-        &mut self,
-        key: K,
-        f: impl FnOnce(&mut EntityCommands) + 'static + Send + Sync,
-    ) {
-        let loc: &'static Location = Location::caller();
-        let callsite = (loc as *const Location) as u64;
-        let ident = key.into_ident();
-
-        assert!(
-            self.0
-                .insert(ImmidiateId::Keyed { callsite, ident }, Box::new(f))
-                .is_none(),
-        );
-    }
-
-    #[track_caller]
-    pub fn flurp_insert(&mut self, b: impl Bundle) {
-        let loc: &'static Location = Location::caller();
-        let callsite = (loc as *const Location) as u64;
-
-        assert!(
-            self.0
-                .insert(
-                    ImmidiateId::Single { callsite },
-                    Box::new(move |ec| {
-                        ec.insert(b);
-                    })
-                )
-                .is_none(),
-        );
-    }
-
-    #[track_caller]
-    pub fn flurp_insert_keyed<K: IntoIdent + Debug>(&mut self, key: K, b: impl Bundle) {
-        let loc: &'static Location = Location::caller();
-        let callsite = (loc as *const Location) as u64;
-        let ident = key.into_ident();
-
-        assert!(
-            self.0
-                .insert(
-                    ImmidiateId::Keyed { callsite, ident },
-                    Box::new(move |ec| {
-                        ec.insert(b);
-                    })
-                )
-                .is_none(),
-        );
-    }
-
-    // pub fn flurp_this<'a>(
-    //     &mut self,
-    //     id: impl Into<Cow<'a, str>>,
-    //     f: impl Fn(&mut EntityCommands) + 'static + Send + Sync,
-    // ) {
-    //     let id = id.into();
-    //     self.0.insert(
-    //         ImmidiateId::GlobalKeyed(id.into_owned().into_boxed_str()),
-    //         Box::new(f),
-    //     );
-    // }
+    fn_deactivate: HashMap<(Loc, Option<Key>), Vec<(Entity, EntityFn)>>,
 }
 
-#[derive(Component)]
-#[component(storage = "SparseSet")]
-pub struct Active;
+/// Global Entity Protocol
+#[derive(SystemParam)]
+pub struct Gep<'w, 's> {
+    data: ResMut<'w, GepData>,
+    commands: Commands<'w, 's>,
+}
 
-impl FlurpStorage {
-    fn apply(
-        mut diffs: ResMut<Self>,
-        enabled: Query<(Entity, &ImmidiateId), With<Active>>,
-        disabled: Query<(Entity, &ImmidiateId), Without<Active>>,
-        mut commands: Commands,
-    ) {
-        for (e, id) in disabled {
-            if let Some(t) = diffs.0.remove(id) {
-                t(&mut commands.entity(e).insert(Active));
+pub struct GepWithTarget<'a, 'w, 's> {
+    gep: &'a mut Gep<'w, 's>,
+    ident: Ident,
+    cid: (Loc, Option<Key>),
+}
+
+impl<'w, 's> Gep<'w, 's> {
+    #[track_caller]
+    pub fn target<'a>(&'a mut self, ident: impl Into<Ident>) -> GepWithTarget<'a, 'w, 's> {
+        let ident = ident.into();
+        let cid = match ident.clone() {
+            Ident::Loc(loc) => (loc, None),
+            Ident::Key(key) => (Loc::from(Location::caller()), Some(key)),
+            Ident::LocAndKey(loc, key) => (loc, Some(key)),
+        };
+
+        self.data.all_calls_next.push(cid.clone());
+        self.data.prev_calls_next.push(cid.clone());
+
+        GepWithTarget {
+            gep: self,
+            ident: ident,
+            cid: cid,
+        }
+    }
+}
+
+impl<'a, 'w, 's> GepWithTarget<'a, 'w, 's> {
+    pub fn once(self, f: impl Into<EntityFn>) -> Self {
+        let entity = *self
+            .gep
+            .data
+            .ident_to_entity
+            .entry(self.ident.clone())
+            .or_insert_with_key(|ident| self.gep.commands.spawn(ident.clone()).id());
+
+        if !self.gep.data.all_calls.contains(&self.cid) {
+            f.into().0(&mut self.gep.commands.entity(entity));
+        }
+
+        return self;
+    }
+
+    pub fn on_awake(self, f: impl Into<EntityFn>) -> Self {
+        let entity = *self
+            .gep
+            .data
+            .ident_to_entity
+            .entry(self.ident.clone())
+            .or_insert_with_key(|ident| self.gep.commands.spawn(ident.clone()).id());
+
+        if !self.gep.data.prev_calls.contains(&self.cid) {
+            f.into().0(&mut self.gep.commands.entity(entity));
+        }
+
+        return self;
+    }
+
+    pub fn on_update(self, f: impl Into<EntityFn>) -> Self {
+        let entity = *self
+            .gep
+            .data
+            .ident_to_entity
+            .entry(self.ident.clone())
+            .or_insert_with_key(|ident| self.gep.commands.spawn(ident.clone()).id());
+
+        f.into().0(&mut self.gep.commands.entity(entity));
+
+        return self;
+    }
+
+    pub fn on_sleep(self, f: impl Into<EntityFn>) -> Self {
+        let Some(entity) = self.gep.data.ident_to_entity.get(&self.ident).cloned() else {
+            return self;
+        };
+
+        self.gep
+            .data
+            .fn_deactivate
+            .entry(self.cid.clone())
+            .or_default()
+            .push((entity, f.into()));
+
+        return self;
+    }
+}
+
+impl GepData {
+    pub fn update(mut data: ResMut<Self>, mut commands: Commands) {
+        for (cid, fns) in mem::take(&mut data.fn_deactivate) {
+            if !data.prev_calls.contains(&cid) {
+                for (entity, f) in fns {
+                    f.0(&mut commands.entity(entity));
+                }
             }
         }
 
-        for (e, id) in enabled {
-            if let Some(t) = diffs.0.remove(id) {
-                t(&mut commands.entity(e));
-            } else {
-                commands.entity(e).remove::<Active>();
-            }
-        }
-
-        for (id, t) in diffs.0.drain() {
-            t(&mut commands.spawn((id, Active)));
-        }
+        data.prev_calls = data.prev_calls_next.drain(..).collect();
+        data.all_calls = data.all_calls_next.drain(..).collect();
     }
 }
 
 #[derive(SystemSet, Hash, PartialEq, Eq, Clone, Debug)]
-pub struct FlurpPlugin;
+pub struct GepPlugin;
 
-impl Plugin for FlurpPlugin {
+impl Plugin for GepPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<FlurpStorage>();
-        app.add_systems(Update, (FlurpStorage::apply).in_set(FlurpPlugin));
-    }
-}
-
-pub trait IntoIdent {
-    fn into_ident(self) -> u64;
-}
-
-impl IntoIdent for u64 {
-    fn into_ident(self) -> u64 {
-        self
-    }
-}
-
-impl IntoIdent for usize {
-    fn into_ident(self) -> u64 {
-        self as u64
+        app.init_resource::<GepData>();
+        app.add_systems(Update, (GepData::update).in_set(GepPlugin));
     }
 }

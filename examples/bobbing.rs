@@ -6,11 +6,11 @@ use bevy_potoo::prelude::*;
 fn main() {
     let mut app = App::new();
     app.add_plugins(DefaultPlugins);
-    app.add_plugins(FlurpPlugin);
+    app.add_plugins(GepPlugin);
 
     app.init_resource::<GameState>();
     app.add_systems(Startup, (setup, GameState::start));
-    app.add_systems(Update, GameState::update.before(FlurpPlugin));
+    app.add_systems(Update, GameState::update.before(GepPlugin));
 
     app.run();
 }
@@ -35,27 +35,31 @@ impl GameState {
 
     pub fn update(
         gs: ResMut<Self>,
-        mut d: ResMut<FlurpStorage>,
+        mut gep: Gep,
         time: Res<Time>,
         mut materials: ResMut<Assets<ColorMaterial>>,
         mut meshes: ResMut<Assets<Mesh>>,
-        mut mesh_mat: Local<(Mesh2d, MeshMaterial2d<ColorMaterial>)>,
+        mut mesh: Local<Mesh2d>,
+        mut mat: Local<MeshMaterial2d<ColorMaterial>>,
     ) {
         INIT.call_once(|| {
-            mesh_mat.0 = Mesh2d(meshes.add(Mesh::from(Rectangle::new(50.0, 50.0))));
-            mesh_mat.1 =
-                MeshMaterial2d(materials.add(ColorMaterial::from(Color::from(css::ORANGE))));
+            *mesh = Mesh2d(meshes.add(Mesh::from(Rectangle::new(50.0, 50.0))));
+            *mat = MeshMaterial2d(materials.add(ColorMaterial::from(Color::from(css::ORANGE))));
         });
 
         for (i, b) in gs.boxes.iter().enumerate() {
-            d.flurp_insert_keyed(
-                i,
-                (
-                    Transform::from_xyz(b.x, b.y + (time.elapsed_secs().sin() * 50.0), 0.0),
-                    mesh_mat.0.clone(),
-                    mesh_mat.1.clone(),
-                ),
-            );
+            let tf = Transform::from_xyz(b.x, b.y + (time.elapsed_secs().sin() * 50.0), 0.0);
+            let mesh = mesh.clone();
+            let mat = mat.clone();
+
+            gep.target((Loc::here(), Key::from(i)))
+                .once(move |ec: &mut EntityCommands| {
+                    ec.insert((mesh, mat));
+                })
+                .on_update(move |ec: &mut EntityCommands| {
+                    ec.insert(tf);
+                });
+            // .on_awake(f).on_sleep(f)
         }
     }
 }
