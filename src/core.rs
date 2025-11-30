@@ -1,28 +1,22 @@
-use crate::fun::EntityFn;
-use crate::ident::{Ident, Key, Loc};
+use crate::fun::TreadSafeEntityFn;
+use crate::ident::{CallsiteIdent, EntityIdent, Ident};
 use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
 use bevy::{ecs::system::SystemParam, platform::collections::HashMap};
 use std::fmt::Debug;
 use std::mem;
-use std::panic::Location;
-
-enum Status {
-    Active,
-    Inactive,
-}
 
 #[derive(Resource, Default)]
 struct GepData {
-    ident_to_entity: HashMap<Ident, Entity>,
+    ident_to_entity: HashMap<EntityIdent, Entity>,
 
-    all_calls: HashSet<(Loc, Option<Key>)>,
-    all_calls_next: Vec<(Loc, Option<Key>)>,
+    all_calls: HashSet<CallsiteIdent>,
+    new_calls: HashSet<CallsiteIdent>,
 
-    prev_calls: HashSet<(Loc, Option<Key>)>,
-    prev_calls_next: Vec<(Loc, Option<Key>)>,
+    prev_calls: HashSet<CallsiteIdent>,
+    prev_calls_next: Vec<CallsiteIdent>,
 
-    fn_deactivate: HashMap<(Loc, Option<Key>), Vec<(Entity, EntityFn)>>,
+    fn_deactivate: HashMap<CallsiteIdent, Vec<(Entity, TreadSafeEntityFn)>>,
 }
 
 /// Global Entity Protocol
@@ -32,93 +26,64 @@ pub struct Gep<'w, 's> {
     commands: Commands<'w, 's>,
 }
 
-pub struct GepWithTarget<'a, 'w, 's> {
-    gep: &'a mut Gep<'w, 's>,
-    ident: Ident,
-    cid: (Loc, Option<Key>),
-}
-
 impl<'w, 's> Gep<'w, 's> {
-    #[track_caller]
-    pub fn target<'a>(&'a mut self, ident: impl Into<Ident>) -> GepWithTarget<'a, 'w, 's> {
-        let ident = ident.into();
-        let cid = match ident.clone() {
-            Ident::Loc(loc) => (loc, None),
-            Ident::Key(key) => (Loc::from(Location::caller()), Some(key)),
-            Ident::LocAndKey(loc, key) => (loc, Some(key)),
-        };
+    fn handle_callsite(&mut self, ident: Ident) -> CallsiteIdent {
+        let callsite_ident: CallsiteIdent = ident.into();
+        self.data.prev_calls_next.push(callsite_ident);
+        if !self.data.all_calls.contains(&callsite_ident) {
+            self.data.all_calls.insert(callsite_ident);
+            self.data.new_calls.insert(callsite_ident);
+        }
+        callsite_ident
+    }
 
-        self.data.all_calls_next.push(cid.clone());
-        self.data.prev_calls_next.push(cid.clone());
+    pub fn get(&mut self, ident: Ident) -> Entity {
+        self.handle_callsite(ident);
 
-        GepWithTarget {
-            gep: self,
-            ident: ident,
-            cid: cid,
+        let entity_ident = ident.into();
+        if let Some(entity) = self.data.ident_to_entity.get(&entity_ident) {
+            return *entity;
+        }
+
+        let entity = self.commands.spawn(entity_ident).id();
+        self.data.ident_to_entity.insert(entity_ident, entity);
+
+        entity
+    }
+
+    pub fn when_once(&mut self, ident: Ident) -> bool {
+        self.handle_callsite(ident);
+
+        let callsite_ident: CallsiteIdent = ident.into();
+        self.data.new_calls.contains(&callsite_ident)
+    }
+
+    pub fn when_init(&mut self, ident: Ident) -> bool {
+        self.handle_callsite(ident);
+
+        let callsite_ident: CallsiteIdent = ident.into();
+        self.data.new_calls.contains(&callsite_ident)
+    }
+
+    pub fn when_activate(&mut self, ident: Ident) -> bool {
+        self.handle_callsite(ident);
+
+        let callsite_ident: CallsiteIdent = ident.into();
+        !self.data.prev_calls.contains(&callsite_ident)
+    }
+
+    pub fn on_deactivate(&mut self, ident: Ident, f: impl Into<TreadSafeEntityFn>) {
+        let callsite_ident: CallsiteIdent = ident.into();
+        let entity_ident: EntityIdent = ident.into();
+        if let Some(entity) = self.data.ident_to_entity.get(&entity_ident).cloned() {
+            self.data
+                .fn_deactivate
+                .entry(callsite_ident)
+                .or_default()
+                .push((entity, f.into()));
         }
     }
 }
-
-impl<'a, 'w, 's> GepWithTarget<'a, 'w, 's> {
-    pub fn once(self, f: impl Into<EntityFn>) -> Self {
-        let entity = *self
-            .gep
-            .data
-            .ident_to_entity
-            .entry(self.ident.clone())
-            .or_insert_with_key(|ident| self.gep.commands.spawn(ident.clone()).id());
-
-        if !self.gep.data.all_calls.contains(&self.cid) {
-            f.into().0(&mut self.gep.commands.entity(entity));
-        }
-
-        return self;
-    }
-
-    pub fn on_awake(self, f: impl Into<EntityFn>) -> Self {
-        let entity = *self
-            .gep
-            .data
-            .ident_to_entity
-            .entry(self.ident.clone())
-            .or_insert_with_key(|ident| self.gep.commands.spawn(ident.clone()).id());
-
-        if !self.gep.data.prev_calls.contains(&self.cid) {
-            f.into().0(&mut self.gep.commands.entity(entity));
-        }
-
-        return self;
-    }
-
-    pub fn on_update(self, f: impl Into<EntityFn>) -> Self {
-        let entity = *self
-            .gep
-            .data
-            .ident_to_entity
-            .entry(self.ident.clone())
-            .or_insert_with_key(|ident| self.gep.commands.spawn(ident.clone()).id());
-
-        f.into().0(&mut self.gep.commands.entity(entity));
-
-        return self;
-    }
-
-    pub fn on_sleep(self, f: impl Into<EntityFn>) -> Self {
-        let Some(entity) = self.gep.data.ident_to_entity.get(&self.ident).cloned() else {
-            return self;
-        };
-
-        self.gep
-            .data
-            .fn_deactivate
-            .entry(self.cid.clone())
-            .or_default()
-            .push((entity, f.into()));
-
-        return self;
-    }
-}
-
 impl GepData {
     pub fn update(mut data: ResMut<Self>, mut commands: Commands) {
         for (cid, fns) in mem::take(&mut data.fn_deactivate) {
@@ -130,7 +95,7 @@ impl GepData {
         }
 
         data.prev_calls = data.prev_calls_next.drain(..).collect();
-        data.all_calls = data.all_calls_next.drain(..).collect();
+        data.new_calls.clear();
     }
 }
 

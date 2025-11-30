@@ -1,6 +1,4 @@
-use std::sync::Once;
-
-use bevy::{color::palettes::css, mesh, prelude::*};
+use bevy::{color::palettes::css, prelude::*};
 use bevy_potoo::prelude::*;
 
 fn main() {
@@ -8,8 +6,7 @@ fn main() {
     app.add_plugins(DefaultPlugins);
     app.add_plugins(GepPlugin);
 
-    app.init_resource::<GameState>();
-    app.add_systems(Startup, (setup, GameState::start));
+    app.add_systems(Startup, setup);
     app.add_systems(Update, GameState::update.before(GepPlugin));
 
     app.run();
@@ -24,42 +21,49 @@ struct GameState {
     boxes: Vec<Vec2>,
 }
 
-static INIT: Once = Once::new();
-
 impl GameState {
-    pub fn start(mut gs: ResMut<Self>) {
-        gs.boxes.push(Vec2::new(-100.0, 0.0));
-        gs.boxes.push(Vec2::new(100.0, 0.0));
-        gs.boxes.push(Vec2::new(0.0, 100.0));
-    }
-
     pub fn update(
-        gs: ResMut<Self>,
         mut gep: Gep,
-        time: Res<Time>,
-        mut materials: ResMut<Assets<ColorMaterial>>,
-        mut meshes: ResMut<Assets<Mesh>>,
+
+        mut gs: Local<Self>,
         mut mesh: Local<Mesh2d>,
         mut mat: Local<MeshMaterial2d<ColorMaterial>>,
+
+        mut commands: Commands,
+
+        mut materials: ResMut<Assets<ColorMaterial>>,
+        mut meshes: ResMut<Assets<Mesh>>,
+        time: Res<Time>,
     ) {
-        INIT.call_once(|| {
+        if gep.when_once(Ident::here()) {
+            gs.boxes.push(Vec2::new(-100.0, 0.0));
+            gs.boxes.push(Vec2::new(100.0, 0.0));
+            gs.boxes.push(Vec2::new(0.0, 100.0));
+
             *mesh = Mesh2d(meshes.add(Mesh::from(Rectangle::new(50.0, 50.0))));
             *mat = MeshMaterial2d(materials.add(ColorMaterial::from(Color::from(css::ORANGE))));
-        });
+        }
 
         for (i, b) in gs.boxes.iter().enumerate() {
-            let tf = Transform::from_xyz(b.x, b.y + (time.elapsed_secs().sin() * 50.0), 0.0);
-            let mesh = mesh.clone();
-            let mat = mat.clone();
+            let ident = Ident::here_keyed(i);
+            let e = gep.get(ident);
 
-            gep.target((Loc::here(), Key::from(i)))
-                .once(move |ec: &mut EntityCommands| {
-                    ec.insert((mesh, mat));
-                })
-                .on_update(move |ec: &mut EntityCommands| {
-                    ec.insert(tf);
-                });
-            // .on_awake(f).on_sleep(f)
+            if gep.when_init(ident) {
+                println!("Initializing entity {:?}", e);
+                commands.entity(e).insert((mesh.clone(), mat.clone()));
+            }
+
+            // if gep.when_activate(ident) {
+            //     todo!();
+            // }
+
+            commands.entity(e).insert(Transform::from_xyz(
+                b.x,
+                b.y + (time.elapsed_secs().sin() * 50.0),
+                0.0,
+            ));
+
+            // gep.on_deactivate(ident, |ec: &mut EntityCommands| todo!());
         }
     }
 }

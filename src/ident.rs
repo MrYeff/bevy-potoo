@@ -2,26 +2,34 @@ use std::panic::Location;
 
 use bevy::ecs::component::Component;
 
-#[derive(Hash, Eq, PartialEq, Debug, Clone)]
-pub struct Loc(u64);
+#[derive(Debug, Clone, Copy)]
+pub enum Ident {
+    /// Entity and Call only Identified by Loc
+    Loc(Loc),
+    /// Entity Only Identified by Key, Call identified by Loc and Key
+    Keyed(Loc, Key),
+    /// Entity and Call identified by Loc and Key
+    LocKeyed(Loc, Key),
+}
 
-impl Loc {
+impl Ident {
     #[track_caller]
     pub fn here() -> Self {
-        let loc: &'static Location = Location::caller();
-        let callsite = (loc as *const Location) as u64;
-        Loc(callsite)
+        Self::Loc(Location::caller().into())
+    }
+
+    #[track_caller]
+    pub fn keyed(key: impl Into<Key>) -> Self {
+        Self::Keyed(Location::caller().into(), key.into())
+    }
+
+    #[track_caller]
+    pub fn here_keyed(key: impl Into<Key>) -> Self {
+        Self::LocKeyed(Location::caller().into(), key.into())
     }
 }
 
-impl From<&'static Location<'_>> for Loc {
-    fn from(v: &'static Location<'_>) -> Self {
-        let callsite = (v as *const Location) as u64;
-        Loc(callsite)
-    }
-}
-
-#[derive(Hash, Eq, PartialEq, Debug, Clone)]
+#[derive(Hash, Eq, PartialEq, Debug, Clone, Copy)]
 pub enum Key {
     U64(u64),
     Str(&'static str),
@@ -49,27 +57,44 @@ impl From<&'static str> for Key {
     }
 }
 
-#[derive(Component, Hash, Eq, PartialEq, Debug, Clone)]
-pub enum Ident {
-    Loc(Loc),
-    Key(Key),
-    LocAndKey(Loc, Key),
-}
+#[derive(Hash, Eq, PartialEq, Debug, Clone, Copy)]
+pub struct Loc(u64);
 
-impl<T: Into<Key>> From<T> for Ident {
-    fn from(v: T) -> Self {
-        Ident::Key(v.into())
+impl From<&'static Location<'_>> for Loc {
+    fn from(v: &'static Location<'_>) -> Self {
+        let callsite = (v as *const Location) as u64;
+        Loc(callsite)
     }
 }
 
-impl From<Loc> for Ident {
-    fn from(v: Loc) -> Self {
-        Ident::Loc(v)
+#[derive(Hash, Eq, PartialEq, Debug, Clone, Copy)]
+pub(crate) enum CallsiteIdent {
+    LocOnly(Loc),
+    WithKey(Loc, Key),
+}
+
+impl From<Ident> for CallsiteIdent {
+    fn from(value: Ident) -> Self {
+        match value {
+            Ident::Loc(loc) => Self::LocOnly(loc),
+            Ident::Keyed(loc, key) | Ident::LocKeyed(loc, key) => Self::WithKey(loc, key),
+        }
     }
 }
 
-impl<T: Into<Key>> From<(Loc, T)> for Ident {
-    fn from(v: (Loc, T)) -> Self {
-        Ident::LocAndKey(v.0, v.1.into())
+#[derive(Component, Hash, Eq, PartialEq, Debug, Clone, Copy)]
+pub(crate) enum EntityIdent {
+    LocOnly(Loc),
+    WithKey(Loc, Key),
+    Global(Key),
+}
+
+impl From<Ident> for EntityIdent {
+    fn from(value: Ident) -> Self {
+        match value {
+            Ident::Loc(loc) => Self::LocOnly(loc),
+            Ident::Keyed(_, key) => Self::Global(key),
+            Ident::LocKeyed(loc, key) => Self::WithKey(loc, key),
+        }
     }
 }
