@@ -1,10 +1,15 @@
-[package]
-name = "bevy-potoo"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = ["bevy-potoo", "bevy-potoo-draw"]
+resolver = "3"
 
-[dependencies]
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[workspace.dependencies]
 bevy = "0.17.3"
 
-[dev-dependencies]
-rand = "0.9.2"
+bevy-potoo = { path = "bevy-potoo" }
+bevy-potoo-draw = { path = "bevy-potoo-draw" }

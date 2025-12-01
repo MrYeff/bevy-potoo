@@ -17,6 +17,7 @@ struct GepData {
     prev_calls_next: Vec<CallsiteIdent>,
 
     fn_deactivate: HashMap<CallsiteIdent, Vec<(Entity, TreadSafeEntityFn)>>,
+    fn_deactivate_next: HashMap<CallsiteIdent, Vec<(Entity, TreadSafeEntityFn)>>,
 }
 
 /// Global Entity Protocol
@@ -58,13 +59,6 @@ impl<'w, 's> Gep<'w, 's> {
         self.data.new_calls.contains(&callsite_ident)
     }
 
-    pub fn when_init(&mut self, ident: Ident) -> bool {
-        self.handle_callsite(ident);
-
-        let callsite_ident: CallsiteIdent = ident.into();
-        self.data.new_calls.contains(&callsite_ident)
-    }
-
     pub fn when_activate(&mut self, ident: Ident) -> bool {
         self.handle_callsite(ident);
 
@@ -73,11 +67,13 @@ impl<'w, 's> Gep<'w, 's> {
     }
 
     pub fn on_deactivate(&mut self, ident: Ident, f: impl Into<TreadSafeEntityFn>) {
+        self.handle_callsite(ident);
+
         let callsite_ident: CallsiteIdent = ident.into();
         let entity_ident: EntityIdent = ident.into();
         if let Some(entity) = self.data.ident_to_entity.get(&entity_ident).cloned() {
             self.data
-                .fn_deactivate
+                .fn_deactivate_next
                 .entry(callsite_ident)
                 .or_default()
                 .push((entity, f.into()));
@@ -86,8 +82,9 @@ impl<'w, 's> Gep<'w, 's> {
 }
 impl GepData {
     pub fn update(mut data: ResMut<Self>, mut commands: Commands) {
-        for (cid, fns) in mem::take(&mut data.fn_deactivate) {
-            if !data.prev_calls.contains(&cid) {
+        let fn_deactivate_next = mem::take(&mut data.fn_deactivate_next);
+        for (cid, fns) in mem::replace(&mut data.fn_deactivate, fn_deactivate_next) {
+            if !data.prev_calls_next.contains(&cid) {
                 for (entity, f) in fns {
                     f.0(&mut commands.entity(entity));
                 }
